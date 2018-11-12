@@ -28,8 +28,8 @@ public class Weight {
 	 * The constructor for most systems, where the weight is represented by a
 	 * single double value.
 	 * 
-	 * @param weight
-	 * @param units
+	 * @param weight	The weight of the object.
+	 * @param units		The units in which weight was measured.
 	 */
 	public Weight(double weight, Units units) {
 		this.weight = weight;
@@ -41,8 +41,8 @@ public class Weight {
 	 * lbs value must be an integer, and the units are assumed to be
 	 * {@link Units#LBS_OZ}.
 	 * 
-	 * @param lbs
-	 * @param oz
+	 * @param lbs	The pounds portion that this weight represents.
+	 * @param oz	The ounces portion that this weight represents.
 	 */
 	public Weight(int lbs, double oz) {
 		this.lbs = lbs;
@@ -56,7 +56,7 @@ public class Weight {
 	 * the accessors {@link #getLbs()} and {@link #getOz()}. Otherwise, use
 	 * {@link #getWeight()}.
 	 * 
-	 * @return
+	 * @return	A boolean indicating whether this object represents a weight in {@link Units#LBS_OZ}.
 	 */
 	public boolean isLbsOz() {
 		if (units == Units.LBS_OZ) {
@@ -70,7 +70,7 @@ public class Weight {
 	 * The accessor for the weight represented by this class, in any units other
 	 * than {@link Units#LBS_OZ}.
 	 * 
-	 * @return
+	 * @return	A double representing the weight in a single continuous value in one set of units.
 	 * @throws NCIException	Thrown when the units are {@link Units#LBS_OZ}.
 	 */
 	public double getWeight() throws NCIException {
@@ -83,7 +83,7 @@ public class Weight {
 	 * {@link Units#LBS_OZ}. This does not include the remainder of the weight
 	 * in ounces.
 	 * 
-	 * @return
+	 * @return	The pounds portion of the weight this object represents.
 	 * @throws NCIException	Thrown when the units are not {@link Units#LBS_OZ}
 	 */
 	public int getLbs() throws NCIException {
@@ -96,7 +96,7 @@ public class Weight {
 	 * {@link Units#LBS_OZ}. This does not include the majority of the weight in
 	 * lbs.
 	 * 
-	 * @return
+	 * @return	The ounces portion of the weight this object represents.
 	 * @throws NCIException	Thrown when the units are not in {@link Units#LBS_OZ}
 	 */
 	public double getOz() throws NCIException {
@@ -107,7 +107,7 @@ public class Weight {
 	/**
 	 * The units in which the weight is represented.
 	 * 
-	 * @return
+	 * @return	The units in which the weight is represented.
 	 */
 	public Units getUnits() {
 		return units;

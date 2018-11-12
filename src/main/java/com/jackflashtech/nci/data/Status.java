@@ -60,17 +60,17 @@ public class Status {
 	 * Constructor for this data transport object (DTO). There is currently no
 	 * support for some values not being provided.
 	 * 
-	 * @param inMotion
-	 * @param scaleAtZero
-	 * @param ramError
-	 * @param eepromError
-	 * @param underCapacity
-	 * @param overCapacity
-	 * @param romError
-	 * @param faultyCalibration
-	 * @param range
-	 * @param weightType
-	 * @param initialZeroError
+	 * @param inMotion			A boolean indicating whether the scale is in motion.
+	 * @param scaleAtZero		A boolean indicating whether the scale is at zero.
+	 * @param ramError			A boolean indicating whether a RAM error is present.
+	 * @param eepromError		A boolean indicating whether an EEPROM error is present.
+	 * @param underCapacity		A boolean indicating whether the scale is under-capacity.
+	 * @param overCapacity		A boolean indicating whether the scale is over-capacity.
+	 * @param romError			A boolean indicating whether a ROM error is present.
+	 * @param faultyCalibration	A boolean indicating whether the scale detected a calibration problem.
+	 * @param range				An indication whether the scale is in its low range or high range.
+	 * @param weightType		An indication whether the reading represents a Net weight, with tare activated, or Gross, meaning relative to an empty scale.
+	 * @param initialZeroError	Not really sure what this mean.
 	 */
 	public Status(boolean inMotion, boolean scaleAtZero, boolean ramError, boolean eepromError, boolean underCapacity,
 			boolean overCapacity, boolean romError, boolean faultyCalibration, Range range, WeightType weightType,
