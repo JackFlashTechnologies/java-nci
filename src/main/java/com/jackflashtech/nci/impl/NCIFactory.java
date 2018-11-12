@@ -15,10 +15,12 @@ import com.jackflashtech.nci.NCIException;
  * the root of the classpath in a file called "nci.properties". For a device we
  * choose to refer to as "brecknell" that communications over COM6, we would set
  * up a properties file such as:
- * 
+ * <br>
+ * <pre>
  * nci.brecknell.implclass=NCIDeviceRxtx
  * nci.brecknell.paritycheck=false
  * nci.brecknell.commport=COM6
+ * </pre>
  * 
  * Other than "implclass", the other properties should be documented in the
  * specific implementation of NCIDevice specified in "implclass".
@@ -43,12 +45,15 @@ public class NCIFactory {
 		if (settings == null) throw new NCIException("This factory was not initialized correctly. This probably comes from not finding nci.properties.");
 		Properties deviceProperties = new Properties();
 		String deviceClassName = this.settings.getProperty("nci." + name + ".implclass");
+		if (deviceClassName == null) throw new NCIException("There was no class name found to instantiate with name '" + name + "'.");
 		for (String propName : this.settings.stringPropertyNames()) {
 			deviceProperties.put(propName, this.settings.get(propName));
 		}
 		try {
-			Class<? extends NCIDevice> deviceClassObj =
-					this.getClass().getClassLoader().loadClass(deviceClassName).asSubclass(NCIDevice.class);
+			Class<?> objClass =
+					this.getClass().getClassLoader().loadClass(deviceClassName);
+			if(objClass == null) throw new NCIException("No class found with name: " + deviceClassName);
+			Class<? extends NCIDevice> deviceClassObj = objClass.asSubclass(NCIDevice.class);
 			Constructor<? extends NCIDevice> deviceConstructor =
 					deviceClassObj.getDeclaredConstructor(Properties.class, String.class);
 			return deviceConstructor.newInstance(deviceProperties, name);

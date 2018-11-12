@@ -3,6 +3,7 @@ package com.jackflashtech.nci.impl;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
@@ -21,11 +22,39 @@ import gnu.io.PortInUseException;
 import gnu.io.SerialPort;
 import gnu.io.SerialPortEvent;
 import gnu.io.SerialPortEventListener;
+import gnu.io.UnsupportedCommOperationException;
 
+// TODO: If a synchronous method is called, then times out, then another
+// function is called, then the original function returns, the new state will be
+// parsed as it if it is the response to the new call. I do not see a valid way
+// to respond to this, with this architecture or any other.
 public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
+	/**
+	 * This is the timeout when waiting to get the COM port.
+	 */
 	private static final int COMM_TIMEOUT = 2000;
-	private final static int TIMEOUT = 10000;
+	/**
+	 * This is the timeout when waiting for a response from the device.
+	 */
+	private final static int TIMEOUT = 2000;
+	/**
+	 * The allocated length of the message from the device. This is almost
+	 * certainly too small to support advanced messages like from Request About
+	 * or Request Diag.
+	 */
 	private final static int INPUT_BUFFER_LENGTH = 30;
+	
+	/**
+	 * This is a {@link Map} of the String representation of the units to the
+	 * representation of the units in {@link Units}. It is cached here to speed
+	 * up resolution. Representing units with an enum instead of a String makes
+	 * the driver less stable to devices supporting units differently, but it
+	 * solves issues of capitalization or other issues when working across
+	 * different systems. This lookup can grow until it supports everything
+	 * (which I anticipate happening easily and quicly), and then measurements
+	 * across devices can be compared more easily on the part of the developer
+	 * using this library.
+	 */
 	private final static Map<String, Units> UNITS_LOOKUP = new HashMap<String, Units>();
 	{
 		UNITS_LOOKUP.put("kg", Units.KG);
@@ -33,11 +62,13 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		UNITS_LOOKUP.put("g", Units.G);
 		UNITS_LOOKUP.put("oz", Units.OZ);
 	}
+	
 	// These are constructed on start-up because all of the states are supposed
 	// to be stateless. Consider making instances of
 	// SynchronousTransmissionState and AsynchronousTransmissionState cached
-	// like this; I didn't only because they are technically stateful and it
-	// seemed like an opportunity for confusion.
+	// like this; I didn't only because having a cached version of
+	// SynchronousTransmissionState and setting the internal state would be
+	// technically stateful and it seemed like an opportunity for confusion.
 	private final ITransmissionState STATUS_STATE = new SimpleStatusTransmissionState();
 	private final ITransmissionState WEIGHT_STATE = new GeneralTransmissionState(new WeightTransmissionState(STATUS_STATE));
 	private final ITransmissionState UNITS_STATE = new GeneralTransmissionState(new UnitsTransmissionState(STATUS_STATE));
@@ -46,8 +77,6 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 	private final ITransmissionState DIAGNOSTICS_STATE = new GeneralTransmissionState(new DiagnosticsTransmissionState(STATUS_STATE));
 	
 	private SerialPort port;
-	OutputStream os;
-	InputStream is;
 	private IPrimaryState currentState = null;
 	boolean checkParity;
 	NCIDeviceListener listener = null;
@@ -57,6 +86,7 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 	volatile Units units = null;
 	volatile NCIException transmissionException;
 	volatile Weight metrology = null;
+	// TODO: Presumably, there will be other DTOs for the About, Diagnostic, Metrology states, etc.
 	volatile Status status = null;
 	
 	/**
@@ -72,31 +102,63 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		String portName = null;
 		try {
 			portName = deviceProperties.getProperty("nci." + name + ".commport");
-			if (portName == null) throw new NCIException("No port name found.");
-			
-			CommPortIdentifier portId = CommPortIdentifier.getPortIdentifier(portName);
-			SerialPort port = (SerialPort) portId.open("NCI Driver: " + name, COMM_TIMEOUT);
+			String autoDiscovery = deviceProperties.getProperty("nci." + name + ".autodiscovery");
+			// TODO: If autoDiscovery is provided but not parseable, then this is an error.
+			// TODO: if autoDiscovery is provided but false, then this is nonsense.
+			if (portName == null && autoDiscovery == null) throw new NCIException("No port name found.");
 			String checkParityString = deviceProperties.getProperty("nci." + name + ".checkparity");
 			if (checkParityString == null) throw new NCIException("Did not find a value for checkparity.");
 			
-			this.checkParity = Boolean.parseBoolean(checkParityString);
-			port.setDTR(false);
-			port.setRTS(false);
-			this.port = port;
-			port.addEventListener(this);
-			port.notifyOnDataAvailable(true);
-			this.os = this.port.getOutputStream();
-			this.is = this.port.getInputStream();
+			if (portName != null) {
+				CommPortIdentifier portId = CommPortIdentifier.getPortIdentifier(portName);
+				this.port = (SerialPort) portId.open("NCI Driver: " + name, COMM_TIMEOUT);
+				port.setSerialPortParams(115200, SerialPort.DATABITS_8, SerialPort.STOPBITS_1, SerialPort.PARITY_NONE);
+				port.setDTR(false);
+				port.setRTS(false);
+				port.addEventListener(this);
+				port.notifyOnDataAvailable(true);
+			} else if(Boolean.parseBoolean(autoDiscovery)) { // TODO: Realistically, there should be a better test that autoDiscovery is parseable and isn't an error.
+				Enumeration<?> ids = CommPortIdentifier.getPortIdentifiers();
+				while (ids.hasMoreElements()) {
+					CommPortIdentifier id = (CommPortIdentifier)ids.nextElement();
+					if (!id.isCurrentlyOwned()) {
+						SerialPort port = (SerialPort)id.open("NCI Driver: " + name,  COMM_TIMEOUT);
+						port.setSerialPortParams(115200, SerialPort.DATABITS_8, SerialPort.STOPBITS_1, SerialPort.PARITY_NONE);
+						port.setDTR(false);
+						port.setRTS(false);
+						port.addEventListener(this);
+						port.notifyOnDataAvailable(true);
+						this.port = port;
+						Status status;
+						try {
+							status = this.requestStatus();
+							if (status == null) {
+								this.port.close();
+								this.port = null;
+							} else {
+								break;
+							}
+						} catch (NCIException e) {
+							this.port.close();
+							this.port = null;
+						}
+					}
+				}
+				if (this.port == null) throw new NCIException("No devices were found that correctly responded as NCI devices.");
+			} else {
+				// TODO: There should be an error condition here.
+			}
+			this.checkParity = Boolean.parseBoolean(checkParityString);	
 		} catch (NoSuchPortException e) {
 			throw new NCIException("There is no COM port named " + portName + ".", e);
 		} catch (PortInUseException e) {
-			throw new NCIException("COM port named " + portName + " is in use.");
+			throw new NCIException("COM port named " + portName + " is in use.", e);
 		} catch (TooManyListenersException e) {
 			this.port.close();
 			throw new NCIException("The underlying port will not accept more listeners, so this device object will not work.", e);
-		} catch (IOException e) {
+		} catch (UnsupportedCommOperationException e) {
 			this.port.close();
-			throw new NCIException("This device failed to initialize correctly.");
+			throw new NCIException("Bonkers.");
 		}
 	}
 
@@ -106,78 +168,92 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 	}
 
 	public Weight getWeight() throws NCIException {
+		Weight returnValue;
 		this.weight = null;
+		this.transmissionException = null;
 		
 		if (this.currentState != null) throw new NCIException("This device is in the middle of a communication and does not support concurrent operations.");
 		synchronized (this) {
 			byte[] outputMessage = {'W', 0x0d};
 			try {
-				os.write(outputMessage);
-				os.flush();
+				this.port.getOutputStream().write(outputMessage);
+				this.port.getOutputStream().flush();
 				this.currentState = new SynchronousTransmissionState(WEIGHT_STATE);
 				this.wait(TIMEOUT);
 				if (this.transmissionException != null) throw this.transmissionException;
 				if (weight == null) {
 					throw new NCIException("There was a timeout or a failure to parse the response. No weight available.");
 				}
+				returnValue = this.weight;
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.weight = null;
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 
-		Weight returnValue = this.weight;
-		this.weight = null;
 		return returnValue;
 	}
 	
 	@Override
 	public Weight getHighResolutionWeight() throws NCIException {
+		Weight returnValue;
 		this.weight = null;
 		
 		if (this.currentState != null) throw new NCIException("This device is in the middle of a communication and does not support concurrent operations.");
 		synchronized (this) {
 			byte[] outputMessage = {'H', 0x0d};
 			try {
-				os.write(outputMessage);
-				os.flush();
+				this.port.getOutputStream().write(outputMessage);
+				this.port.getOutputStream().flush();
 				this.currentState = new SynchronousTransmissionState(WEIGHT_STATE);
 				this.wait(TIMEOUT);
 				if (this.transmissionException != null) throw this.transmissionException;
 				if (weight == null) {
 					throw new NCIException("There was a timeout or a failure to parse the response. No weight available.");
 				}
+				returnValue = this.weight;
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.weight = null;
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 
-		Weight returnValue = this.weight;
-		this.weight = null;
 		return returnValue;
 	}
 
 	@Override
 	public Units changeUnitsOfMeasure() throws NCIException {
+		Units returnValue;
 		this.units = null;
 		
 		if (this.currentState != null) throw new NCIException("This device is in the middle of a communication and does not support concurrent operations.");
 		synchronized (this) {
 			byte[] outputMessage = {'U', 0x0d};
 			try {
-				os.write(outputMessage);
-				os.flush();
+				this.port.getOutputStream().write(outputMessage);
+				this.port.getOutputStream().flush();
 				this.currentState = new SynchronousTransmissionState(UNITS_STATE);
 				this.wait(TIMEOUT);
 				if (this.transmissionException != null) throw this.transmissionException;
 				if (this.units == null) {
 					throw new NCIException("There was a timeout or a failure to parse the response. The change of units is unknown.");
 				}
+				returnValue = this.units;
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.units = null;
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
-		Units returnValue = this.units;
-		this.units = null;
+
 		return returnValue;
 	}
 
@@ -190,6 +266,7 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		synchronized (this) {
 			byte[] outputMessage = {'M', 0x0d};
 			try {
+				OutputStream os = this.port.getOutputStream();
 				os.write(outputMessage);
 				os.flush();
 				this.currentState = new SynchronousTransmissionState(WEIGHT_STATE);
@@ -200,6 +277,9 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 				}
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 		//Weight returnValue = this.metrology;
@@ -216,6 +296,7 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		synchronized (this) {
 			byte[] outputMessage = {'A', 0x0d};
 			try {
+				OutputStream os = this.port.getOutputStream();
 				os.write(outputMessage);
 				os.flush();
 				this.currentState = new SynchronousTransmissionState(ABOUT_STATE);
@@ -226,6 +307,9 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 				}
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 		//Weight returnValue = this.metrology;
@@ -241,6 +325,7 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		synchronized (this) {
 			byte[] outputMessage = {'D', 0x0d};
 			try {
+				OutputStream os = this.port.getOutputStream();
 				os.write(outputMessage);
 				os.flush();
 				this.currentState = new SynchronousTransmissionState(DIAGNOSTICS_STATE);
@@ -251,6 +336,9 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 				}
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 		//Weight returnValue = this.metrology;
@@ -262,8 +350,10 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 	public Status requestStatus() throws NCIException {
 		if (this.currentState != null) throw new NCIException("This device is in the middle of a communication and does not support concurrent operations.");
 		synchronized (this) {
+			this.status = null;
 			byte[] outputMessage = {'S', 0x0d};
 			try {
+				OutputStream os = this.port.getOutputStream();
 				os.write(outputMessage);
 				os.flush();
 				this.currentState = new SynchronousTransmissionState(STATUS_STATE);
@@ -274,6 +364,9 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 				}
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 		return this.status;
@@ -284,15 +377,23 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		
 		if (this.currentState != null) throw new NCIException("This device is in the middle of a communication and does not support concurrent operations.");
 		synchronized (this) {
+			this.status = null;
 			byte[] outputMessage = {'T', 0x0d};
 			try {
+				OutputStream os = this.port.getOutputStream();
 				os.write(outputMessage);
 				os.flush();
 				this.currentState = new SynchronousTransmissionState(STATUS_STATE);
 				this.wait(TIMEOUT);
 				if (this.transmissionException != null) throw this.transmissionException;
+				if (this.status == null) {
+					throw new NCIException("There was a timeout or a failure to parse the response. The request for a new status failed.");
+				}
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 	}
@@ -304,6 +405,7 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 		synchronized (this) {
 			byte[] outputMessage = {'Z', 0x0d};
 			try {
+				OutputStream os = this.port.getOutputStream();
 				os.write(outputMessage);
 				os.flush();
 				this.currentState = new SynchronousTransmissionState(STATUS_STATE);
@@ -311,27 +413,21 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 				if (this.transmissionException != null) throw this.transmissionException;
 			} catch (IOException | InterruptedException e) {
 				throw new NCIException(e);
+			} finally {
+				this.transmissionException = null;
+				this.currentState = null;
 			}
 		}
 	}
 	
 	public void closeDevice() throws NCIException {
-		try {
-			this.is.close();
-			this.os.close();
-		} catch (IOException e) {
-			throw new NCIException(e);
-		} finally {
-			port.removeEventListener();
-			this.is = null;
-			this.os = null;
-			this.port.close();	
-		}
+		port.removeEventListener();
+		this.port.close();	
 	}
 
 	public void serialEvent(SerialPortEvent event) {
-		if (this.currentState != null) {
-			synchronized (this) {
+		synchronized (this) {
+			if (this.currentState != null) {
 				switch (event.getEventType()) {
 				case SerialPortEvent.BI:
 				case SerialPortEvent.OE:
@@ -347,13 +443,20 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 					this.currentState.parseInput();
 				}
 
-				this.notify();
+				this.currentState = null;
+			} else {
+				// Throwing away data. There doesn't seem to be anyway to know what
+				// else to do; presumably this happened because the wait() call was
+				// interrupted and I've already thrown an exception, but the data
+				// came back anyway.
+				try {
+					InputStream is = NCIDeviceRxtx.this.port.getInputStream();
+					while(is.read() > 0) {}
+				} catch (IOException e) {
+					// Nothing really to be done here. There is no state, so the
+					// synchronous or asynchronous nature is unknown.
+				}
 			}
-		} else {
-			// Throwing away data. There doesn't seem to be anyway to know what
-			// else to do; presumably this happened because the wait() call was
-			// interrupted and I've already thrown an exception, but the data
-			// came back anyway.
 		}
 	}
 	
@@ -707,21 +810,25 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 
 		@Override
 		public void parseInput() {
-			byte[] inputMessage = new byte[INPUT_BUFFER_LENGTH];
-			try {
-				int bytesRead = 0;
-				int oldBytesRead = 0;
-				do {
-					oldBytesRead = bytesRead;
-					bytesRead += is.read(inputMessage, bytesRead, INPUT_BUFFER_LENGTH - bytesRead);
-				} while (bytesRead != oldBytesRead && bytesRead < INPUT_BUFFER_LENGTH && inputMessage[bytesRead - 1] != 0x03);
-				this.internalState.parseInput(bytesRead, 0, inputMessage);
-			} catch (NCIException e) {
-				NCIDeviceRxtx.this.transmissionException = e;
-			} catch (IOException e) {
-				NCIDeviceRxtx.this.transmissionException = new NCIException("IOException retrieving data.", e);
+			synchronized (NCIDeviceRxtx.this) {
+				byte[] inputMessage = new byte[INPUT_BUFFER_LENGTH];
+				try {
+					int bytesRead = 0;
+					int oldBytesRead = 0;
+					InputStream is = NCIDeviceRxtx.this.port.getInputStream();
+					do {
+						oldBytesRead = bytesRead;
+						bytesRead += is.read(inputMessage, bytesRead, INPUT_BUFFER_LENGTH - bytesRead);
+					} while (bytesRead != oldBytesRead && bytesRead < INPUT_BUFFER_LENGTH && inputMessage[bytesRead - 1] != 0x03);
+					this.internalState.parseInput(bytesRead, 0, inputMessage);
+				} catch (NCIException e) {
+					NCIDeviceRxtx.this.transmissionException = e;
+				} catch (IOException e) {
+					NCIDeviceRxtx.this.transmissionException = new NCIException("IOException retrieving data.", e);
+				} finally {
+					NCIDeviceRxtx.this.notify();
+				}
 			}
-			
 		}		
 	}
 	
@@ -739,11 +846,13 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 			try {
 				int bytesRead = 0;
 				int oldBytesRead = 0;
+				InputStream is = NCIDeviceRxtx.this.port.getInputStream();
 				do {
 					oldBytesRead = bytesRead;
 					bytesRead += is.read(inputMessage, bytesRead, INPUT_BUFFER_LENGTH - bytesRead);
 				} while (bytesRead != oldBytesRead && bytesRead < INPUT_BUFFER_LENGTH && inputMessage[bytesRead - 1] != 0x03);
 				this.internalState.parseInput(bytesRead, 0, inputMessage);
+				// TODO: Notify the listener of results.
 			} catch (NCIException e) {
 				// TODO: Call the exception event on the listener
 			} catch (IOException e) {
