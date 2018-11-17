@@ -123,7 +123,7 @@ public class NCIDeviceRxtx implements NCIDevice, SerialPortEventListener {
 					CommPortIdentifier id = (CommPortIdentifier)ids.nextElement();
 					if (!id.isCurrentlyOwned()) {
 						SerialPort port = (SerialPort)id.open("NCI Driver: " + name,  COMM_TIMEOUT);
-						port.setSerialPortParams(115200, SerialPort.DATABITS_8, SerialPort.STOPBITS_1, SerialPort.PARITY_NONE);
+						//port.setSerialPortParams(115200, SerialPort.DATABITS_8, SerialPort.STOPBITS_1, SerialPort.PARITY_NONE);
 						port.setDTR(false);
 						port.setRTS(false);
 						port.addEventListener(this);
